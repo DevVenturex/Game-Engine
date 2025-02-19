@@ -70,7 +70,7 @@ impl EguiRenderer {
         encoder: &mut CommandEncoder,
         window: &Window,
         window_surface_view: &TextureView,
-        screen_descriptor: ScreenDescriptor,
+        screen_descriptor: &ScreenDescriptor,
     ) {
         if !self.frame_started {
             error!("begin_frame must be called before end_frame_and_draw can be called!");

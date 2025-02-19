@@ -3,7 +3,7 @@ use winit::event::WindowEvent;
 pub trait Layer {
     fn init(&mut self);
     fn update(&mut self);
-    fn event(&mut self, event: WindowEvent);
+    fn event(&mut self, event: &WindowEvent);
 }
 
 pub struct LayerStack {
