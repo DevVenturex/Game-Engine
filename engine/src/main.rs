@@ -1,8 +1,9 @@
 use std::env;
-use winit::event_loop::EventLoop;
 use crate::application::Application;
 
 mod application;
+mod layers;
+pub mod egui;
 
 fn main() {
     unsafe { env::set_var("RUST_LOG", "debug") };
