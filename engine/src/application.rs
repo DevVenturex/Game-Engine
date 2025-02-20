@@ -1,16 +1,17 @@
 use std::collections::HashMap;
+use std::os::unix::process;
 use std::process::ExitStatus;
+use std::rc::Rc;
 use std::sync::Arc;
 use egui::WidgetInfo;
-use egui_wgpu::{wgpu, ScreenDescriptor};
-use egui_wgpu::wgpu::SurfaceError;
-use log::{debug, info, warn};
+use egui_wgpu::ScreenDescriptor;
+use log::{debug, error, info, warn};
+use wgpu::CommandEncoderDescriptor;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
-use crate::egui::renderer::EguiRenderer;
 use crate::layers::layer_stack::{Layer, LayerStack};
 
 pub enum UserEvent {
@@ -18,7 +19,7 @@ pub enum UserEvent {
 }
 
 pub struct Application {
-    windows: HashMap<WindowId, Arc<Window>>,
+    window_states: HashMap<WindowId, State>,
     layer_stack: LayerStack,
     event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
 }
@@ -26,25 +27,15 @@ pub struct Application {
 impl Application {
     pub fn new() -> Self{
         Self {
-            windows: HashMap::new(),
+            window_states: HashMap::new(),
             layer_stack: LayerStack::new(),
             event_loop_proxy: None,
         }
     }
 
-    async fn set_window(&mut self, window: Window) {
-        let window_id = window.id();
-        let window = Arc::new(window);
-        let initial_width = 1280;
-        let initial_height = 720;
-
-        let _ = window.request_inner_size(PhysicalSize::new(initial_width, initial_height));
-
-        self.windows.insert(window_id, window);
-    }
-
     pub fn run(&mut self) {
         self.init();
+        
         self.update();
     }
 
@@ -59,8 +50,8 @@ impl Application {
     }
 
     fn update(&mut self) {
-        for (_, window) in &mut self.windows.iter_mut() {
-            window.request_redraw();
+        for (_, window) in &mut self.window_states.iter_mut() {
+            window.window.request_redraw();
         }
     }
 
@@ -77,10 +68,15 @@ impl Application {
 
 impl ApplicationHandler<UserEvent> for Application {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.windows.is_empty() {
-            warn!("No windows found in resumed. Creating Window...");
-            let window = event_loop.create_window(ApplicationConfig::default().window_attributes()).unwrap();
-            pollster::block_on(self.set_window(window));
+        if self.window_states.is_empty() {
+            let window = Arc::new(event_loop.create_window(
+                WindowAttributes::default()
+                    .with_title("App Window")
+                    .with_inner_size(PhysicalSize::new(1280, 720)),
+            ).unwrap());
+            let window_id = window.id();
+            let state = pollster::block_on(State::new(window.clone()));
+            self.window_states.insert(window_id, state);
         }
     }
 
@@ -97,110 +93,150 @@ impl ApplicationHandler<UserEvent> for Application {
         match event {
             WindowEvent::CloseRequested => {
                 warn!("Window Close requested. Closing Window {:?}", window_id);
-                self.windows.remove(&window_id);
+                self.window_states.remove(&window_id);
             },
+            WindowEvent::Resized(new_size) => {
+                self.window_states.get_mut(&window_id).unwrap().resize(new_size);
+            }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.windows.is_empty() {
+        if self.window_states.is_empty() {
             warn!("No active window, exiting...");
             event_loop.exit()
         }
         self.update();
+        self.window_states
+            .iter_mut()
+            .for_each(|(_, state)| {
+                match state.render() {
+                    Ok(_) => {},
+                    Err(
+                        wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated,
+                    ) => state.resize(state.size),
+                    Err(wgpu::SurfaceError::OutOfMemory | wgpu::SurfaceError::Other) => {
+                        error!("OutOfMemory");
+                        event_loop.exit()
+                    }
+                    Err(wgpu::SurfaceError::Timeout) => {
+                        warn!("Surface timeout")
+                    }
+                }
+            })
     }
 }
 
-pub struct ApplicationState {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub surface_config: wgpu::SurfaceConfiguration,
-    pub surface: wgpu::Surface<'static>,
-    pub scale_factor: f32,
+pub struct State {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    size: PhysicalSize<u32>,
+    window: Arc<Window>,
 }
 
-impl ApplicationState {
-    pub async fn new(
-        instance: &wgpu::Instance,
-        surface: wgpu::Surface<'static>,
-        _window: &Window,
-        size: PhysicalSize<u32>,
-    ) -> Self {
-        let power_ref = wgpu::PowerPreference::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: power_ref,
-                force_fallback_adapter: false,
+impl State {
+    async fn new(window: Arc<Window>) -> State {
+        let size = window.inner_size();
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
+
+        let adapter = instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
-            })
-            .await
-            .expect("Failed to find an appropriate adapter");
+                force_fallback_adapter: false,
+            },
+        ).await.unwrap();
 
-        let features = wgpu::Features::empty();
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: None,
-                    required_features: features,
-                    required_limits: Default::default(),
-                    memory_hints: Default::default(),
-                },
-                None,
-            )
-            .await
-            .expect("Failed to create device");
+        let (device, queue) = adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                label: None,
+                memory_hints: Default::default(),
+            },
+            None,
+        ).await.unwrap();
 
-        let swapchain_capabilities = surface.get_capabilities(&adapter);
-        let selected_format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let swapchain_format = swapchain_capabilities
-            .formats
-            .iter()
-            .find(|d| **d == selected_format)
-            .expect("Failed to select proper surface texture format");
-
-        let surface_config = wgpu::SurfaceConfiguration {
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps.formats.iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+        let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: *swapchain_format,
+            format: surface_format,
             width: size.width,
             height: size.height,
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 0,
-            alpha_mode: swapchain_capabilities.alpha_modes[0],
-            view_formats: vec![]
+            present_mode: surface_caps.present_modes[0],
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
 
-        surface.configure(&device, &surface_config);
-
-        let scale_factor = 1.0;
-
         Self {
+            surface,
             device,
             queue,
-            surface,
-            surface_config,
-            scale_factor,
+            config,
+            size,
+            window,
         }
     }
 
-    pub fn resize_surface(&mut self, size: PhysicalSize<u32>) {
-        self.surface_config.width = size.width;
-        self.surface_config.height = size.height;
-        self.surface.configure(&self.device, &self.surface_config);
-    }
-}
-
-#[derive(Default)]
-pub struct ApplicationConfig {}
-
-impl ApplicationConfig {
-    pub fn new() -> ApplicationConfig {
-        Self {}
+    pub fn window(&self) -> &Window {
+        &self.window
     }
 
-    pub fn window_attributes(&self) -> WindowAttributes {
-        WindowAttributes::default()
-            .with_title("Engine Application")
-            .with_inner_size(LogicalSize::new(1280, 720))
+    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
+        if new_size.width > 0 && new_size.height > 0 {
+            self.size = new_size;
+            self.config.width = new_size.width;
+            self.config.height = new_size.height;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let output = self.surface.get_current_texture()?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
+
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.2,
+                            b: 0.3,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+
+        Ok(())
     }
 }
