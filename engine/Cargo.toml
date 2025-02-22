@@ -1,0 +1,16 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+readme = "../README.md"
+
+[dependencies]
+egui = "0.31.0"
+egui-wgpu = { version = "0.31.0", features = ["winit"] }
+egui-winit = "0.31.0"
+env_logger = "0.11.6"
+log = "0.4.25"
+pollster = "0.4.0"
+raw-window-handle = "0.6.2"
+wgpu = "24.0.1"
+winit = { version = "0.30.9"}
