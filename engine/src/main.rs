@@ -1,12 +1,10 @@
 use std::env;
-use crate::application::Application;
-
-mod application;
-mod layers;
+use engine::Application;
 
 fn main() {
     unsafe { env::set_var("RUST_LOG", "debug") };
     env_logger::init();
+
     let mut app = Application::new();
-    app.run();
+    pollster::block_on(app.run());
 }

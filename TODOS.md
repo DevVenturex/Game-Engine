@@ -1,6 +1,5 @@
-## 19.02.2025
-- [ ] implementing simple wgpu setup
-- [ ] implementing Egui
-- [ ] editing Backgroundcolor with Egui panels
-- [ ] render Triangle with wgpu on egui viewport
-- **Issues:** Kind of slow
+## 22. Feb 2025: *Open up a Window*
+- [x] implement basic Application Struct
+- [x] implement Stacks
+- [x] implement Window Stack/System
+- [x] implement Layer Stack
